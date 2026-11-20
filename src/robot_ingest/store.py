@@ -72,6 +72,18 @@ class Store:
             shutil.rmtree(trash, ignore_errors=True)
         (self.root / "rejected" / f"{episode_id}.json").unlink(missing_ok=True)
 
+    def reuse_file(self, existing: Path, target: Path) -> None:
+        """Place an already-stored file into a new bundle without copying its bytes when possible.
+
+        A hard link here; on object storage, a server-side copy. The old bundle can then be replaced
+        as usual while the new one keeps the file.
+        """
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(existing, target)
+        except OSError:  # a filesystem without hard links
+            shutil.copy2(existing, target)
+
     def discard_staging(self, staging: Path) -> None:
         shutil.rmtree(staging, ignore_errors=True)
 

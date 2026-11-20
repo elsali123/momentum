@@ -6,8 +6,12 @@ Per source:
      replaced by the next candidate, so the sample size holds and stays deterministic
 Per episode (one bundle, built in staging and committed atomically):
   mapper.normalize -> validate_frames -> raw copy -> frames.parquet -> one H.264 video per
-  camera -> episode.json -> commit. Episodes already committed by this pipeline/schema version
-  at the same source revision are skipped, so re-runs are cheap and resumable.
+  camera -> episode.json -> commit.
+
+Re-runs redo only what changed. Each bundle records what its steps were made from (`build_info`):
+an episode whose inputs are all unchanged is skipped; when only the data step changed (a new mapper
+or rule version, say), it is re-normalized and re-validated but keeps its videos, because each video
+is fingerprinted by its own inputs and re-encoded only when those change.
 """
 
 from __future__ import annotations
@@ -26,14 +30,14 @@ import pyarrow.parquet as pq
 
 from robot_ingest import __version__
 from robot_ingest.catalog import build_catalog
-from robot_ingest.config import Config, SourceSpec
+from robot_ingest.config import Config, PipelineSettings, SourceSpec
 from robot_ingest.schema import SCHEMA_VERSION
 from robot_ingest.sources import MAPPERS
 from robot_ingest.sources.base import Mapper, NormalizedEpisode, SourceDataError, commercial_use_allowed, make_episode_id
 from robot_ingest.sources.lerobot import LeRobotRepo
 from robot_ingest.store import Store
-from robot_ingest.validate import validate_camera, validate_frames
-from robot_ingest.video import VideoError, transcode_segment
+from robot_ingest.validate import RULES_VERSION, validate_camera, validate_frames
+from robot_ingest.video import ENCODER_VERSION, TranscodeResult, VideoError, transcode_segment, video_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +49,7 @@ class EpisodeOutcome:
     status: str  # "ingested" | "skipped" (already up to date) | "rejected" (bad data) | "failed" (error)
     messages: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    videos_reused: int = 0  # camera videos carried over from the episode's previous version instead of re-encoded
 
     @property
     def accepted(self) -> bool:
@@ -97,8 +102,9 @@ def ingest_source(spec: SourceSpec, config: Config, store: Store, cache_dir: Pat
             batch = candidates[next_candidate:next_candidate + target - accepted]
             next_candidate += len(batch)
             for outcome in pool.map(lambda i: ingest_episode(mapper, i, config, store, force), batch):
+                reused = f"{outcome.videos_reused} videos reused; " if outcome.videos_reused else ""
                 log.info("  %-22s %-9s %4.1fs %s", outcome.episode_id, outcome.status, outcome.seconds,
-                         "; ".join(outcome.messages)[:160])
+                         (reused + "; ".join(outcome.messages))[:160])
                 outcomes.append(outcome)
                 accepted += outcome.accepted
     if accepted < target:
@@ -110,11 +116,13 @@ def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, for
     spec, settings = mapper.spec, config.pipeline
     episode_id = make_episode_id(spec.source_id, index)
     started = time.monotonic()
+    build = build_info(mapper, settings)
 
-    def outcome(status: str, messages: list[str]) -> EpisodeOutcome:
-        return EpisodeOutcome(episode_id, spec.source_id, status, messages, time.monotonic() - started)
+    def outcome(status: str, messages: list[str], videos_reused: int = 0) -> EpisodeOutcome:
+        return EpisodeOutcome(episode_id, spec.source_id, status, messages, time.monotonic() - started, videos_reused)
 
-    if not force and is_up_to_date(store.load_bundle(episode_id), spec):
+    previous = None if force else store.load_bundle(episode_id)  # --force rebuilds everything, videos included
+    if is_up_to_date(previous, build):
         return outcome("skipped", [])
 
     staging = None
@@ -133,14 +141,21 @@ def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, for
 
         staging = store.new_staging_dir(episode_id)
         pq.write_table(episode.frames, staging / "frames.parquet", compression="zstd")
-        camera_rows = []
+        camera_rows, fingerprints, reused = [], {}, 0
+        encoding = {"fps": fps, "expected_frames": episode.frames.num_rows,
+                    "crf": settings.video_crf, "keyframe_interval": settings.video_keyframe_interval}
         for camera in episode.cameras:
             video = staging / "videos" / f"{camera.camera_id}.mp4"
             thumb = staging / "thumbs" / f"{camera.camera_id}.jpg"
-            result = transcode_segment(
-                camera.segment, video, thumb, fps=fps, expected_frames=episode.frames.num_rows,
-                crf=settings.video_crf, keyframe_interval=settings.video_keyframe_interval,
-            )
+            fingerprints[camera.camera_id] = video_fingerprint(camera.segment, **encoding)
+            old = reusable_video(previous, camera.camera_id, fingerprints[camera.camera_id], store)
+            if old:
+                store.reuse_file(store.root / old["video_path"], video)
+                store.reuse_file(store.root / old["thumbnail_path"], thumb)
+                result = TranscodeResult(old["num_frames"], old["width"], old["height"], old["mean_luma"])
+                reused += 1
+            else:
+                result = transcode_segment(camera.segment, video, thumb, **encoding)
             validation.warnings += validate_camera(camera.camera_id, result.mean_luma)
             final_dir = store.episode_dir(episode_id)
             camera_rows.append({
@@ -162,10 +177,11 @@ def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, for
                 "mean_luma": result.mean_luma,
             })
 
-        bundle = {"episode": episode_row(episode, mapper, validation.warnings), "cameras": camera_rows}
+        bundle = {"episode": episode_row(episode, mapper, validation.warnings), "cameras": camera_rows,
+                  "build": {**build, "videos": fingerprints}}
         (staging / "episode.json").write_text(json.dumps(bundle, indent=2))
         store.commit(episode_id, staging)
-        return outcome("ingested", validation.warnings)
+        return outcome("ingested", validation.warnings, reused)
     except (SourceDataError, VideoError) as exc:
         return reject(store, episode_id, spec, [str(exc)])
     except Exception as exc:  # noqa: BLE001 - one bad episode must not stop the run; it is reported
@@ -201,11 +217,42 @@ def episode_row(episode: NormalizedEpisode, mapper: Mapper, warnings: list[str])
     }
 
 
-def is_up_to_date(bundle: dict | None, spec: SourceSpec) -> bool:
-    if bundle is None:
-        return False
-    ep = bundle["episode"]
-    return (ep["source_revision"], ep["schema_version"], ep["pipeline_version"]) == (spec.revision, SCHEMA_VERSION, __version__)
+def build_info(mapper: Mapper, settings: PipelineSettings) -> dict:
+    """What an episode's stored output is made from, per step. Stored in episode.json as "build".
+
+    data:  frames, metadata and validation; cheap to redo
+    video: how videos are encoded; expensive, so each video also gets its own fingerprint (`video_fingerprint`)
+    """
+    spec = mapper.spec
+    info = {
+        "data": {
+            "source_revision": spec.revision,
+            "schema": SCHEMA_VERSION,
+            "mapper": f"{spec.mapper}@{mapper.version}",
+            "rules": RULES_VERSION,
+            "robot": asdict(mapper.robot),
+            "license": spec.license,
+            "min_episode_frames": settings.min_episode_frames,
+        },
+        "video": {"encoder": ENCODER_VERSION, "crf": settings.video_crf, "keyframe_interval": settings.video_keyframe_interval},
+    }
+    return json.loads(json.dumps(info))  # in the form it is stored (tuples become lists), so the two compare equal
+
+
+def is_up_to_date(bundle: dict | None, build: dict) -> bool:
+    """Nothing an episode is made from has changed. Bundles written before build info existed are never up to date."""
+    stored = (bundle or {}).get("build", {})
+    return stored.get("data") == build["data"] and stored.get("video") == build["video"]
+
+
+def reusable_video(previous: dict | None, camera_id: str, fingerprint: str, store: Store) -> dict | None:
+    """The previous version's camera row, if its video was made from exactly the same inputs and is still on disk."""
+    if previous is None or previous.get("build", {}).get("videos", {}).get(camera_id) != fingerprint:
+        return None
+    row = next((c for c in previous["cameras"] if c["camera_id"] == camera_id), None)
+    if row is None or not all((store.root / row[k]).exists() for k in ("video_path", "thumbnail_path")):
+        return None
+    return row
 
 
 def reject(store: Store, episode_id: str, spec: SourceSpec, reasons: list[str]) -> EpisodeOutcome:

@@ -182,8 +182,8 @@ def test_new_code_reprocesses_and_removes_a_kept_copy_that_now_fails(fake, monke
     fake.run(episodes=(0,))
     assert catalog_ids(fake.store) == {episode_id(0)}
 
-    monkeypatch.setattr(pipeline, "__version__", "0.2.0-test")
-    fake.plan[0] = "nan"  # e.g. the new version checks something the old one didn't
+    monkeypatch.setattr(pipeline, "RULES_VERSION", "2-test")
+    fake.plan[0] = "nan"  # e.g. the new rules check something the old ones didn't
     outcomes = fake.run(episodes=(0,))
 
     assert statuses(outcomes) == {episode_id(0): "rejected"}

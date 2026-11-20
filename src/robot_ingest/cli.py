@@ -59,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\nsource        ingested  skipped  rejected  failed")
         for source_id in dict.fromkeys(o.source_id for o in outcomes):
             print(f"{source_id:13s} " + "  ".join(f"{counts[(source_id, s)]:>7d}" for s in statuses))
+        if reused := sum(o.videos_reused for o in outcomes):
+            print(f"\n{reused} camera videos reused from the previous version instead of re-encoded")
         print(f"\nstore: {store.root.resolve()}   report: {store.root / 'reports/ingest_report.json'}")
         return 1 if any(o.status == "failed" for o in outcomes) else 0
 

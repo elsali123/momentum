@@ -11,11 +11,13 @@ that passes every check. Tests inject a fault per episode through `fake.plan`:
     black          the camera recorded black frames                           -> kept, warned
     short_video    the video holds 5 frames fewer than the data               -> rejected
     unreachable    the video file can't be opened, on every try               -> failed
+    moved_video    the same footage, read from a different file               -> kept
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -85,6 +87,15 @@ class FakeRepo:
                 write_concatenated_video(path, {i for i, fault in self.plan.items() if fault == "black"})
         return path
 
+    def moved_video_path(self) -> Path:
+        path = self.root / "videos" / "moved" / "cam_front.mp4"
+        source = self.video_path()
+        with self._lock:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, path)
+        return path
+
 
 class FakeMapper(Mapper):
     def episode_indices(self) -> list[int]:
@@ -114,7 +125,12 @@ class FakeMapper(Mapper):
 
         start = episode_index * n / FPS
         video_frames = n - 5 if fault == "short_video" else n
-        url = str(self.repo.root / "missing.mp4") if fault == "unreachable" else str(self.repo.video_path())
+        if fault == "unreachable":
+            url = str(self.repo.root / "missing.mp4")
+        elif fault == "moved_video":
+            url = str(self.repo.moved_video_path())
+        else:
+            url = str(self.repo.video_path())
         camera = CameraSource("cam_front", "external", "observation.images.cam_front",
                               VideoSegment(url, start, start + video_frames / FPS, "h264"), serial="front")
         return NormalizedEpisode(
@@ -138,11 +154,12 @@ class FakeSource:
     repo: FakeRepo
     plan: dict[int, str] = field(default_factory=dict)
 
-    def run(self, num_episodes: int = 3, episodes: tuple[int, ...] = (), force: bool = False) -> list[EpisodeOutcome]:
+    def run(self, num_episodes: int = 3, episodes: tuple[int, ...] = (), force: bool = False,
+            settings: PipelineSettings = PipelineSettings()) -> list[EpisodeOutcome]:
         spec = SourceSpec(source_id=SOURCE_ID, customer_id="customer_test", mapper="fake", repo_id="test/fake",
                           revision="rev-1", robot_id=ROBOT.robot_id, num_episodes=num_episodes, seed=0,
                           episodes=tuple(episodes), license="cc-by-4.0")
-        config = Config(PipelineSettings(), {ROBOT.robot_id: ROBOT}, (spec,))
+        config = Config(settings, {ROBOT.robot_id: ROBOT}, (spec,))
         return run_ingest(config, self.store, self.repo.root / "cache", workers=2, force=force)
 
     def bundle(self, index: int) -> dict | None:

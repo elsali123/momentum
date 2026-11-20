@@ -349,10 +349,9 @@ Each decision: **what** was decided, the **alternatives**, **why**, and the **co
 ### D18. Idempotency, atomicity, lineage, versioning
 
 - **Decision.** Each bundle is built in `.staging/` and moved into `episodes/` with a rename.
-  Re-runs skip episodes already committed with the same `source_revision`, `schema_version` and
-  `pipeline_version` (`--force` overrides). Every episode records its repo, revision, source
-  format and index, the schema and pipeline versions, and `ingested_at`. Units and docs are
-  embedded in the Parquet field metadata.
+  Every episode records its repo, revision, source format and index, the schema and pipeline
+  versions, and `ingested_at`. Units and docs are embedded in the Parquet field metadata.
+  Re-runs are incremental per step (D23); `--force` rebuilds everything.
 - **Why.** A crash never leaves a half-written episode visible; re-runs are cheap and resumable;
   any row can be traced back to the exact source bytes.
 
@@ -407,6 +406,28 @@ Each decision: **what** was decided, the **alternatives**, **why**, and the **co
   leftovers from a killed run, re-runs, a new code version that now rejects a kept episode,
   the replacement loop, running out of candidates, and a catalog/schema mismatch.
   `tests/test_viewer.py` (4 tests) checks the viewer API on a store built the same way.
+
+### D23. Re-runs redo only the steps whose inputs changed
+
+- **Decision.** Each step has its own version: `Mapper.version` per customer mapper,
+  `RULES_VERSION` for validation, `ENCODER_VERSION` for video. Every bundle records what it was
+  made from in `episode.json` under `build`: the *data* step (source revision, schema, mapper and
+  rules versions, robot spec, license, minimum length) and the *video* settings (encoder version,
+  CRF, keyframe interval), plus a fingerprint per camera video that hashes its exact inputs
+  (source URL, which includes the pinned revision; time range; frame count; encoding settings).
+  A re-run skips an episode when both steps are unchanged. When only the data step changed, the
+  episode is re-normalized and re-validated, and each video whose fingerprint still matches is
+  hard-linked into the new bundle instead of re-encoded. `--force` rebuilds everything.
+- **Alternatives.** One pipeline version for everything (the previous design: any code change
+  re-encoded every video); content-addressed video storage shared across bundles (no linking, but
+  a different store layout and garbage collection of unreferenced files).
+- **Why.** Video encoding is nearly all of the compute (roughly 100 CPU-hours for all of DROID, by
+  estimate), while mapper and rule changes are the common case. Fingerprinting each video by its
+  inputs makes reuse safe: a mapper change that moves a camera's segment re-encodes only that video.
+- **Cost.** A version must be bumped when a step's output changes; forgetting means stale data.
+  Keying the fingerprint on the source file's content hash instead of the revision would also
+  survive unrelated upstream commits (a README edit bumps the revision today). On object storage,
+  the hard link becomes a server-side copy.
 
 ---
 

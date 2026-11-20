@@ -27,8 +27,10 @@ uv run robot-ingest serve        # then open http://127.0.0.1:8000
 ```
 
 The ingest prints a per-source summary and writes everything under `data/`. It is idempotent:
-running it again skips episodes that are already up to date (`--force` re-does them), and an
-interrupted run resumes where it stopped. `rm -rf data/` resets everything.
+running it again skips episodes that are already up to date, and an interrupted run resumes where
+it stopped. After a code change only the affected steps rerun: a new mapper or validation-rule
+version re-normalizes episodes but keeps their videos, which are re-encoded only when their own
+inputs change (`--force` rebuilds everything). `rm -rf data/` resets everything.
 
 Reference run (Apple-silicon laptop, default 4 workers, about 7 minutes):
 

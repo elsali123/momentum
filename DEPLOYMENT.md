@@ -51,7 +51,7 @@ Customer ──upload──► Raw bucket (per customer, versioned, never modifi
 - Compaction: per-recording files merged into large sorted files with row-range pointers, plus per-robot training shards next to the GPUs.
 - Training-set snapshots: a saved list of recordings with the schema and pipeline versions and the filters used, referenced by every training run so models are reproducible.
 - A PyTorch data loader (time windows, action chunks, resampling, per-robot normalization statistics) and a LeRobot export.
-- Backfills: bumping `pipeline_version` reprocesses affected recordings in the background.
+- Backfills: bumping a step version (mapper, validation rules or encoder) reprocesses the affected recordings in the background, re-encoding video only where its inputs changed.
 
 ### Phase 4: customer product
 - Self-serve upload with an automatic data-quality report (validation warnings and the orientation check).

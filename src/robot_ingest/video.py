@@ -11,6 +11,8 @@ index, seeks to the keyframe before the episode, and downloads only that episode
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -25,6 +27,8 @@ from robot_ingest.sources.lerobot import VideoSegment
 
 log = logging.getLogger(__name__)
 
+# Bump when a change in this module alters the files it writes: stored videos are then re-encoded on the next run.
+ENCODER_VERSION = "1"
 # FFmpeg HTTP options: reconnect on drops, give up on a stalled read after 30 s (microseconds).
 HTTP_OPTIONS = {"reconnect": "1", "reconnect_on_network_error": "1", "reconnect_delay_max": "8", "rw_timeout": "30000000"}
 THUMBNAIL_MAX_SIDE = 320
@@ -41,6 +45,16 @@ class TranscodeResult:
     width: int
     height: int
     mean_luma: float  # 0-255 over sampled frames; ~0 means the stream is black
+
+
+def video_fingerprint(segment: VideoSegment, *, fps: float, expected_frames: int, crf: int, keyframe_interval: int) -> str:
+    """Everything an output video is made from, hashed. Same fingerprint, same file, so re-encoding can be skipped.
+
+    For a Hugging Face source the URL contains the pinned revision, so a new revision counts as new input.
+    """
+    inputs = {"encoder": ENCODER_VERSION, "url": segment.url, "start_s": segment.start_s, "end_s": segment.end_s,
+              "fps": fps, "frames": expected_frames, "crf": crf, "keyframe_interval": keyframe_interval}
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def transcode_segment(

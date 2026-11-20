@@ -16,6 +16,8 @@ from robot_ingest.config import RobotSpec
 from robot_ingest.kinematics import CHAINS, forward_kinematics, orientation_residual_deg
 from robot_ingest.schema import column_matrix
 
+# Bump when a rule or threshold changes: stored episodes are then re-validated on the next run (videos are reused).
+RULES_VERSION = "1"
 MAX_ABS_POSITION_M = 2.0  # nothing in a tabletop workcell is 2 m from the robot base: catches mm vs m
 MAX_ABS_JOINT_RAD = 2 * np.pi + 0.1  # beyond one turn: catches degrees vs radians
 MAX_EE_STEP_M = 0.10  # per-frame jump; 1-1.5 m/s at 10-15 fps is a glitch, not motion

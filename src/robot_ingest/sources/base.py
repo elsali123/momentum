@@ -61,6 +61,10 @@ class NormalizedEpisode:
 class Mapper(ABC):
     """Knows what one customer's columns mean and converts them to the canonical schema."""
 
+    # Bump when a change to a mapper alters what it produces: its episodes are then re-normalized on the
+    # next run. Their videos are reused unless the video segments it points at changed too.
+    version = "1"
+
     def __init__(self, spec: SourceSpec, robot: RobotSpec, repo: LeRobotRepo):
         self.spec = spec
         self.robot = robot
