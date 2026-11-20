@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Episode viewer</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1b2130; --muted: #667085; --border: #e2e5ea;
+    --accent: #2563eb; --ok: #157f3d; --bad: #b42318; --warn: #a15c07; --fail: #6d3fc0; --chip: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1218; --panel: #161a22; --text: #e6e8ec; --muted: #98a2b3; --border: #283040;
+            --accent: #6ea8fe; --ok: #4ade80; --bad: #f87171; --warn: #fbbf24; --fail: #b794f6; --chip: #222937; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  .layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); height: 100vh; }
+  aside { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  aside h1 { font-size: 15px; margin: 0; padding: 14px 14px 4px; }
+  .filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; padding: 8px 14px 12px; border-bottom: 1px solid var(--border); }
+  .filters input { grid-column: 1 / -1; }
+  .filters input, .filters select { width: 100%; min-width: 0; }  /* equal columns, never wider than the sidebar */
+  input, select, button { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
+  button { cursor: pointer; }
+  .count { color: var(--muted); font-size: 12px; padding: 6px 14px; border-bottom: 1px solid var(--border); }
+  .runbar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; width: 100%; text-align: left; font-size: 12px; color: var(--muted);
+            background: var(--panel); border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 8px 14px; }
+  .runbar:hover, .runbar.active { background: var(--chip); }
+  .runbar b { color: var(--text); font-weight: 600; }
+  .runbar .go { margin-left: auto; color: var(--accent); }
+  .n-ok { color: var(--ok); } .n-bad { color: var(--bad); font-weight: 600; } .n-fail { color: var(--fail); font-weight: 600; }
+  .list { overflow-y: auto; flex: 1; }
+  .item { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .item:hover { background: var(--chip); }
+  .item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .item img { width: 96px; height: 54px; object-fit: cover; border-radius: 4px; background: #000; }
+  .item .id { font-weight: 600; font-size: 12px; }
+  .item .task { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .meta { color: var(--muted); font-size: 12px; }
+  main { overflow-y: auto; padding: 16px 20px 40px; min-width: 0; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; }
+  header h2 { margin: 0 0 4px; font-size: 18px; }
+  .instruction { font-size: 15px; margin: 4px 0 8px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 2px 9px; font-size: 12px; line-height: 1.4; }
+  .chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); } .chip.warn { color: var(--warn); }
+  details { margin-bottom: 10px; font-size: 13px; }
+  details table { border-collapse: collapse; margin-top: 6px; }
+  details td { padding: 2px 12px 2px 0; vertical-align: top; }
+  details td:first-child { color: var(--muted); white-space: nowrap; }
+  /* Cameras: --cols is set per episode so rows come out balanced; tiles in a shorter last row grow to keep both edges aligned. */
+  .cams { display: flex; flex-wrap: wrap; gap: 8px; }
+  .cam { position: relative; background: #000; border-radius: 6px; overflow: hidden; min-width: 0;
+         flex: 1 1 calc((100% - (var(--cols, 4) - 1) * 8px) / var(--cols, 4)); }
+  .cam video { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; }
+  .cam .label { position: absolute; left: 6px; top: 6px; font-size: 11px; color: #fff; background: rgba(0, 0, 0, .6); padding: 1px 6px; border-radius: 3px; }
+  .cam.black { outline: 2px solid var(--bad); outline-offset: -2px; }
+  .cam .flag { position: absolute; right: 6px; top: 6px; font-size: 11px; font-weight: 600; color: #fff; background: #b42318; padding: 1px 6px; border-radius: 3px; }
+  .marks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 0; color: var(--muted); }
+  .marks button { font-size: 12px; padding: 2px 8px; color: var(--warn); border-color: currentColor; background: transparent; }
+  .muted { color: var(--muted); }
+  .report h3 { font-size: 14px; margin: 22px 0 4px; display: flex; align-items: center; gap: 8px; }
+  .report .hint { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+  .report table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .report th, .report td { text-align: left; padding: 5px 18px 5px 0; border-bottom: 1px solid var(--border); }
+  .report th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .report .rec { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; max-width: 900px; }
+  .report .rec .id { font-weight: 600; }
+  .report .rec ul { margin: 4px 0 0; padding-left: 18px; }
+  .report .none { color: var(--muted); margin: 0; }
+  .transport { position: sticky; top: -16px; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 10px 0; background: var(--bg); }
+  .transport input[type=range] { flex: 1; }
+  .transport .speed { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .transport .readout { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; min-width: 150px; text-align: right; }
+  .plots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .plots .plot:last-child:nth-child(odd) { grid-column: 1 / -1; }  /* an odd plot out spans the row */
+  .plot { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+  .plot h3 { font-size: 12px; font-weight: 600; margin: 0 0 4px; }
+  .plot canvas { display: block; width: 100%; height: 150px; cursor: crosshair; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .legend i { display: inline-block; width: 12px; height: 0; vertical-align: middle; margin-right: 3px; }
+  @media (max-width: 1100px) { .cam { flex-basis: calc((100% - (min(var(--cols, 4), 3) - 1) * 8px) / min(var(--cols, 4), 3)); } }
+  @media (max-width: 1000px) { .plots { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 800px) { .layout { grid-template-columns: 1fr; height: auto; } aside { max-height: 45vh; } .cam { flex-basis: calc((100% - 8px) / 2); } }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <h1>Episodes</h1>
+    <div class="filters">
+      <input id="q" type="search" placeholder="Search id, task, instruction">
+      <select id="customer"><option value="">All customers</option></select>
+      <select id="robot"><option value="">All robots</option></select>
+      <select id="success"><option value="">Any outcome</option><option value="true">Success</option><option value="false">Failure</option><option value="null">Unknown</option></select>
+      <select id="license"><option value="">Any license</option><option value="true">Commercial OK</option><option value="false">Non-commercial</option></select>
+    </div>
+    <button class="runbar" id="runbar" title="Recordings rejected or failed in the last run">Loading run report…</button>
+    <div class="count" id="count"></div>
+    <div class="list" id="list"></div>
+  </aside>
+  <main id="main"><div class="empty">Loading…</div></main>
+</div>
+
+<script>
+const COLORS = ["#2563eb", "#dc2626", "#16a34a", "#9333ea", "#ea580c", "#0891b2", "#ca8a04"];
+const S = { episodes: [], run: null, data: null, fps: 10, n: 0, frame: 0, playing: false, videos: [], plots: [], events: [] };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const outcome = (s) => s === true ? ["ok", "success"] : s === false ? ["bad", "failure"] : ["", "outcome unknown"];
+
+async function init() {
+  [S.episodes, S.run] = await Promise.all(["/api/episodes", "/api/run"].map(async (url) => (await fetch(url)).json()));
+  renderRunBar();
+  $("runbar").onclick = showReport;
+  // value = the id the filter matches on; label = what people read (arm name, not the internal robot id)
+  const choices = { customer: (e) => [e.customer_id, e.customer_id], robot: (e) => [e.robot_id, e.arm_model] };
+  for (const [id, pick] of Object.entries(choices)) {
+    for (const [value, label] of new Map(S.episodes.map(pick))) {
+      $(id).insertAdjacentHTML("beforeend", `<option value="${esc(value)}">${esc(label)}</option>`);
+    }
+  }
+  for (const id of ["q", "customer", "robot", "success", "license"]) $(id).addEventListener("input", renderList);
+  renderList();
+  const first = decodeURIComponent(location.hash.slice(1)) || S.episodes[0]?.episode_id;
+  if (first === "run-report") showReport();
+  else if (first) loadEpisode(first);
+  else $("main").innerHTML = `<div class="empty">No episodes in the store yet. Run <code>robot-ingest ingest</code>.</div>`;
+}
+
+const fmtTime = (iso) => iso ? new Date(iso).toISOString().slice(0, 16).replace("T", " ") + " UTC" : "";
+
+function renderRunBar() {
+  if (!S.run.finished_at) { $("runbar").innerHTML = `<b>No run report yet</b>`; return; }
+  const c = { kept: 0, rejected: 0, failed: 0 };
+  for (const s of Object.values(S.run.summary)) {
+    c.kept += (s.ingested ?? 0) + (s.skipped ?? 0); c.rejected += s.rejected ?? 0; c.failed += s.failed ?? 0;
+  }
+  $("runbar").innerHTML = `<b>Last run</b><span class="n-ok">${c.kept} kept</span>
+    <span class="${c.rejected ? "n-bad" : ""}">${c.rejected} rejected</span><span class="${c.failed ? "n-fail" : ""}">${c.failed} failed</span>
+    <span class="go">Details ›</span>`;
+}
+
+function showReport() {
+  pause();
+  S.data = null; S.videos = []; S.plots = []; S.events = [];
+  history.replaceState(null, "", "#run-report");
+  renderList();
+  $("runbar").classList.add("active");
+  const r = S.run, n = (s, k) => s[k] ?? 0;
+  const record = (id, lines, note = "") => `<div class="rec"><div class="id">${esc(id)}${note ? ` <span class="muted">· ${esc(note)}</span>` : ""}</div>
+    <ul>${lines.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`;
+  $("main").innerHTML = `<div class="report">
+    <header><h2>Run report</h2>
+      <div class="muted">${r.finished_at ? `Last run finished ${fmtTime(r.finished_at)} · pipeline ${esc(r.pipeline_version)}` : "No run has finished yet."}</div></header>
+    <h3>Outcomes in the last run</h3>
+    <table><tr><th>Source</th><th>Kept (new)</th><th>Kept (already done)</th><th>Rejected</th><th>Failed</th></tr>
+      ${Object.entries(r.summary).map(([id, s]) => `<tr><td>${esc(id)}</td><td>${n(s, "ingested")}</td><td>${n(s, "skipped")}</td>
+        <td class="${n(s, "rejected") ? "n-bad" : ""}">${n(s, "rejected")}</td><td class="${n(s, "failed") ? "n-fail" : ""}">${n(s, "failed")}</td></tr>`).join("")}</table>
+    <h3>Rejected recordings <span class="chip ${r.rejected.length ? "bad" : ""}">${r.rejected.length}</span></h3>
+    <p class="hint">The data broke a rule, so it was kept out of the store. Its raw copy stays in <code>raw/&lt;source&gt;/episodes/</code>, and it is checked again on the next run.</p>
+    ${r.rejected.length ? r.rejected.map((x) => record(x.episode_id, x.reasons, `rejected ${fmtTime(x.rejected_at)}`)).join("")
+      : `<p class="none">None. Every recording that was tried passed its checks.</p>`}
+    <h3>Failed in the last run <span class="chip">${r.failed.length}</span></h3>
+    <p class="hint">An unexpected error, such as a download that never recovered. Nothing was stored, and it is tried again on the next run.</p>
+    ${r.failed.length ? r.failed.map((x) => record(x.episode_id, x.messages)).join("") : `<p class="none">None.</p>`}
+  </div>`;
+}
+
+function renderList() {
+  const q = $("q").value.toLowerCase();
+  const shown = S.episodes.filter((e) =>
+    (!q || [e.episode_id, e.task, e.language_instruction].join(" ").toLowerCase().includes(q)) &&
+    (!$("customer").value || e.customer_id === $("customer").value) &&
+    (!$("robot").value || e.robot_id === $("robot").value) &&
+    (!$("success").value || String(e.success) === $("success").value) &&
+    (!$("license").value || String(e.commercial_use_allowed) === $("license").value));
+  $("count").textContent = `${shown.length} of ${S.episodes.length} episodes`;
+  $("list").innerHTML = shown.map((e) => {
+    const [cls, label] = outcome(e.success);
+    return `<div class="item ${S.data?.episode.episode_id === e.episode_id ? "active" : ""}" data-id="${esc(e.episode_id)}">
+      <img loading="lazy" src="/store/${esc(e.thumbnail_path)}" alt="">
+      <div><div class="id">${esc(e.episode_id)}</div>
+        <div class="task">${esc(e.language_instruction || e.task || "(no task)")}</div>
+        <div class="meta">${esc(e.arm_model)}</div>
+        <div class="meta">${e.duration_s.toFixed(1)}&nbsp;s · ${e.num_cameras}&nbsp;cams <span class="chip ${cls}">${label}</span>${e.num_warnings ? ` <span class="chip warn">${e.num_warnings}&nbsp;⚠</span>` : ""}</div>
+      </div></div>`;
+  }).join("");
+  for (const el of $("list").querySelectorAll(".item")) el.onclick = () => loadEpisode(el.dataset.id);
+}
+
+async function loadEpisode(id) {
+  pause();
+  const res = await fetch(`/api/episodes/${encodeURIComponent(id)}`);
+  if (!res.ok) { $("main").innerHTML = `<div class="empty">Episode ${esc(id)} not found.</div>`; return; }
+  const data = await res.json();
+  S.data = data; S.fps = data.episode.fps; S.n = data.episode.num_frames; S.frame = 0; S.events = data.series.events ?? [];
+  history.replaceState(null, "", "#" + encodeURIComponent(id));
+  $("runbar").classList.remove("active");
+  renderList();
+  renderEpisode(data);
+  seek(0);
+}
+
+// Columns that give balanced rows: 3 → 3, 6 → 3+3, 7 → 4+3, 8 → 4+4, 10 → 5+5.
+const cameraColumns = (n) => (n <= 4 ? n : n <= 6 ? 3 : n <= 8 ? 4 : 5);
+
+function renderEpisode({ episode: e, cameras, series }) {
+  const [cls, label] = outcome(e.success);
+  const details = [
+    ["Source", `${e.source_repo} @ ${e.source_revision.slice(0, 10)} · episode ${e.source_episode_index} (${e.source_format})`],
+    ["Robot", `${e.arm_model} + ${e.gripper_model} (${e.robot_id})`],
+    ["Action semantics", e.action_ee_semantics],
+    ["Operator / scene", `${e.operator_id ?? "–"} / ${e.scene_id ?? "–"}`],
+    ["License", `${e.license ?? "unknown"} (commercial use: ${e.commercial_use_allowed ?? "unknown"})`],
+    ["Capture", e.native_capture_hz ? `${e.native_capture_hz} Hz native, resampled to ${e.fps} fps` : `${e.fps} fps`],
+    ["Ingested", `${e.ingested_at} · pipeline ${e.pipeline_version} · schema ${e.schema_version}`],
+  ];
+  $("main").innerHTML = `
+    <header>
+      <h2>${esc(e.episode_id)}</h2>
+      <div class="instruction">${esc(e.language_instruction || e.task || "(no task)")}</div>
+      <div class="chips">
+        <span class="chip">${esc(e.customer_id)}</span><span class="chip">${esc(e.arm_model)}</span>
+        <span class="chip ${cls}">${label}${e.quality_rating != null ? ` · rating ${e.quality_rating}` : ""}</span>
+        <span class="chip">${e.duration_s.toFixed(1)} s · ${e.num_frames} frames · ${e.fps} fps</span>
+        <span class="chip ${e.commercial_use_allowed === false ? "warn" : ""}">${esc(e.license ?? "license unknown")}</span>
+        ${e.validation_warnings.length ? `<span class="chip warn">${e.validation_warnings.length} warning(s)</span>` : ""}
+      </div>
+    </header>
+    ${e.validation_warnings.length || S.events.length ? `<details open><summary>Validation warnings</summary>
+      <ul>${e.validation_warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>
+      ${S.events.length ? `<div class="marks">Marked on the plots:${S.events.map((ev) =>
+        `<button data-frame="${ev.frame}">Frame ${ev.frame} · ${esc(ev.label)}</button>`).join("")}</div>` : ""}</details>` : ""}
+    <details><summary>Episode details</summary><table>${details.map(([k, v]) => `<tr><td>${k}</td><td>${esc(v)}</td></tr>`).join("")}</table></details>
+    <div class="cams" style="--cols:${cameraColumns(cameras.length)}">${cameras.map((c) => `
+      <div class="cam${c.black ? " black" : ""}"><video muted playsinline preload="auto" poster="/store/${esc(c.thumbnail_path)}" src="/store/${esc(c.video_path)}"></video>
+        <span class="label">${esc(c.camera_id)} · ${c.role}</span>${c.black
+          ? `<span class="flag" title="Average brightness ${c.mean_luma.toFixed(1)} of 255">black video</span>` : ""}</div>`).join("")}</div>
+    <div class="transport">
+      <button id="play" title="Space">▶ Play</button>
+      <input id="scrub" type="range" min="0" max="${S.n - 1}" value="0" step="1">
+      <label class="speed" for="rate">Playback speed
+        <select id="rate"><option value="0.5">0.5× (slow)</option><option value="1" selected>1× (real time)</option><option value="2">2×</option><option value="4">4×</option></select>
+      </label>
+      <span class="readout" id="readout"></span>
+    </div>
+    <div class="plots" id="plots"></div>`;
+  S.videos = [...$("main").querySelectorAll("video")];
+  for (const b of $("main").querySelectorAll(".marks button")) b.onclick = () => { pause(); seek(+b.dataset.frame); };
+  $("play").onclick = () => (S.playing ? pause() : play());
+  $("scrub").oninput = (ev) => { pause(); seek(+ev.target.value); };
+  $("rate").onchange = () => S.videos.forEach((v) => (v.playbackRate = +$("rate").value));
+  S.videos.forEach((v) => v.addEventListener("loadedmetadata", () => { if (!S.playing) v.currentTime = (S.frame + 0.5) / S.fps; }, { once: true }));
+
+  const xyz = ["x", "y", "z"];
+  const specs = [
+    { title: "End-effector position (m), solid = measured, dashed = action", lines: [
+      ...series.obs_ee_pos.map((d, i) => ({ d, name: xyz[i], color: COLORS[i] })),
+      ...series.act_ee_pos.map((d, i) => ({ d, name: `${xyz[i]} target`, color: COLORS[i], dash: true })) ] },
+    { title: "Gripper closure (0 = open, 1 = closed)", lines: [
+      { d: series.obs_gripper_closure[0], name: "measured", color: COLORS[0] },
+      { d: series.act_gripper_closure[0], name: "commanded", color: COLORS[1], dash: true } ], range: [0, 1] },
+    { title: "Joint positions (rad)", lines: series.obs_joint_pos.map((d, i) => ({ d, name: e.joint_names[i] ?? `j${i}`, color: COLORS[i % COLORS.length] })) },
+  ];
+  if (series.obs_wrench) specs.push({ title: "Wrist force (N)", lines: series.obs_wrench.slice(0, 3).map((d, i) => ({ d, name: `f${xyz[i]}`, color: COLORS[i] })) });
+  const legendEntry = (l) => `<span><i style="border-top: 2px ${l.dash ? "dashed" : "solid"} ${l.color}"></i>${esc(l.name)}</span>`;
+  const jumpEntry = S.events.length ? legendEntry({ name: "arm jump (warning)", color: "var(--warn)", dash: true }) : "";
+  $("plots").innerHTML = specs.map((p, i) => `<div class="plot"><h3>${esc(p.title)}</h3><canvas id="plot${i}"></canvas>
+    <div class="legend">${p.lines.filter((l) => !l.dash || p.lines.length <= 2).map(legendEntry).join("")}${jumpEntry}</div></div>`).join("");
+  S.plots = specs.map((p, i) => ({ ...p, canvas: $(`plot${i}`) }));
+  for (const p of S.plots) p.canvas.onclick = (ev) => { pause(); const r = p.canvas.getBoundingClientRect(); seek(Math.round(((ev.clientX - r.left) / r.width) * (S.n - 1))); };
+}
+
+function drawPlot(p) {
+  const c = p.canvas, dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+  const g = c.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  const all = p.lines.flatMap((l) => l.d);
+  let [lo, hi] = p.range ?? [Math.min(...all), Math.max(...all)];
+  if (hi - lo < 1e-6) { lo -= 0.5; hi += 0.5; }
+  const pad = 4, x = (i) => (i / Math.max(1, S.n - 1)) * w, y = (v) => pad + (1 - (v - lo) / (hi - lo)) * (h - 2 * pad);
+  const style = getComputedStyle(document.body);
+  g.fillStyle = style.getPropertyValue("--muted"); g.font = "10px system-ui"; g.fillText(hi.toFixed(2), 2, 10); g.fillText(lo.toFixed(2), 2, h - 2);
+  for (const l of p.lines) {
+    g.strokeStyle = l.color; g.lineWidth = 1.25; g.setLineDash(l.dash ? [4, 3] : []); g.globalAlpha = l.dash ? 0.6 : 1;
+    g.beginPath(); l.d.forEach((v, i) => (i ? g.lineTo(x(i), y(v)) : g.moveTo(x(i), y(v)))); g.stroke();
+  }
+  const warn = style.getPropertyValue("--warn").trim();
+  for (const ev of S.events) { // the same jumps the ingest warning reports: a dashed line plus a notch at the top
+    g.globalAlpha = 1; g.strokeStyle = warn; g.fillStyle = warn; g.lineWidth = 1.5; g.setLineDash([3, 3]);
+    g.beginPath(); g.moveTo(x(ev.frame), 0); g.lineTo(x(ev.frame), h); g.stroke();
+    g.beginPath(); g.moveTo(x(ev.frame) - 5, 0); g.lineTo(x(ev.frame) + 5, 0); g.lineTo(x(ev.frame), 7); g.fill();
+  }
+  g.setLineDash([]); g.globalAlpha = 1; g.strokeStyle = style.getPropertyValue("--text"); g.lineWidth = 1;
+  g.beginPath(); g.moveTo(x(S.frame), 0); g.lineTo(x(S.frame), h); g.stroke();
+}
+
+function updateUI() {
+  $("scrub").value = S.frame;
+  $("readout").textContent = `frame ${S.frame} / ${S.n - 1} · ${(S.frame / S.fps).toFixed(2)} s`;
+  S.plots.forEach(drawPlot);
+}
+
+function seek(frame) {
+  S.frame = Math.max(0, Math.min(S.n - 1, frame));
+  const t = (S.frame + 0.5) / S.fps; // middle of the frame's display interval: lands on frame S.frame exactly
+  S.videos.forEach((v) => { if (v.readyState > 0) v.currentTime = t; });
+  updateUI();
+}
+
+function play() {
+  if (!S.videos.length) return;
+  if (S.frame >= S.n - 1) seek(0);
+  S.playing = true; $("play").textContent = "❚❚ Pause";
+  S.videos.forEach((v) => { v.playbackRate = +$("rate").value; v.play().catch(() => {}); });
+  requestAnimationFrame(tick);
+}
+
+function pause() {
+  S.playing = false;
+  if ($("play")) $("play").textContent = "▶ Play";
+  S.videos.forEach((v) => v.pause());
+}
+
+function tick() {
+  if (!S.playing) return;
+  const [lead, ...rest] = S.videos, t = lead.currentTime;
+  for (const v of rest) if (Math.abs(v.currentTime - t) > 1.5 / S.fps) v.currentTime = t; // re-sync drifting cameras
+  const frame = Math.min(S.n - 1, Math.floor(t * S.fps));
+  if (frame !== S.frame) { S.frame = frame; updateUI(); }
+  if (lead.ended) { pause(); S.frame = S.n - 1; updateUI(); } else requestAnimationFrame(tick);
+}
+
+document.addEventListener("keydown", (ev) => {
+  if (!S.data || ["INPUT", "SELECT"].includes(ev.target.tagName) && ev.target.type !== "range") return;
+  if (ev.code === "Space") { ev.preventDefault(); S.playing ? pause() : play(); }
+  if (ev.code === "ArrowRight") { pause(); seek(S.frame + 1); }
+  if (ev.code === "ArrowLeft") { pause(); seek(S.frame - 1); }
+});
+window.addEventListener("resize", () => S.plots.forEach(drawPlot));
+init();
+</script>
+</body>
+</html>

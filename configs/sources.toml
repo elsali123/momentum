@@ -1,0 +1,76 @@
+# What to ingest, and the robots it was recorded on.
+#
+# Onboarding a customer whose data is in a supported container format (LeRobot v2.1 / v3.0)
+# means: add a [robots.*] block if the embodiment is new, add a [[sources]] block, and point
+# `mapper` at the module that knows what that customer's columns mean (src/robot_ingest/sources/).
+# Every source is pinned to an exact Hub revision so a re-run reads the same bytes.
+
+[pipeline]
+min_episode_frames = 10       # shorter episodes are rejected (DROID contains 1-frame episodes)
+video_crf = 20                # H.264 quality; lower = better/larger. 20 is visually lossless at these sizes
+video_keyframe_interval = 10  # frames between keyframes: bounds the cost of a random seek during training
+
+# ---------------------------------------------------------------- robots (embodiments)
+
+[robots.ur5_wsg50]
+arm_model = "Universal Robots UR5"
+gripper_model = "Weiss WSG-50"
+# Joint order from the official RH20T API config (robot_joint_sequence, cfg 3).
+joint_names = ["shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint", "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"]
+gripper_max_width_m = 0.110
+has_ft_sensor = true
+kinematics = "ur5"
+ee_offset_from_flange_m = 0.250  # reported EE point: TCP 25 cm out along the flange z-axis (fitted, scripts/check_orientation.py)
+
+[robots.kuka_iiwa_robotiq2f85]
+arm_model = "KUKA LBR iiwa"
+gripper_model = "Robotiq 2F-85"
+# Joint order from the official RH20T API config (robot_joint_sequence, cfg 7).
+joint_names = ["lbr_iiwa_joint_1", "lbr_iiwa_joint_2", "lbr_iiwa_joint_3", "lbr_iiwa_joint_4", "lbr_iiwa_joint_5", "lbr_iiwa_joint_6", "lbr_iiwa_joint_7"]
+gripper_max_width_m = 0.085
+has_ft_sensor = true
+kinematics = "kuka_iiwa14"
+ee_offset_from_flange_m = 0.227
+
+[robots.franka_panda_robotiq2f85]
+arm_model = "Franka Emika Panda"
+gripper_model = "Robotiq 2F-85"
+joint_names = ["panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"]
+gripper_max_width_m = 0.085
+has_ft_sensor = false
+kinematics = "franka_panda"
+ee_offset_from_flange_m = 0.0    # DROID reports the flange pose itself
+
+# ---------------------------------------------------------------- sources
+
+[[sources]]
+source_id = "rh20t_cfg3"
+customer_id = "customer_a"
+mapper = "rh20t"
+repo_id = "robot-lev/rh20t_cfg3"
+revision = "343835bee9a3a4045262c9315dcad30088d07a76"
+robot_id = "ur5_wsg50"
+num_episodes = 10
+seed = 0
+# license is decided per episode by the RH20T mapper (it depends on the scene)
+
+[[sources]]
+source_id = "rh20t_cfg7"
+customer_id = "customer_a"
+mapper = "rh20t"
+repo_id = "robot-lev/rh20t_cfg7"
+revision = "7b9a4dee2698cfc980998e20edc32250bc1b4fa1"
+robot_id = "kuka_iiwa_robotiq2f85"
+num_episodes = 10
+seed = 0
+
+[[sources]]
+source_id = "droid"
+customer_id = "customer_b"
+mapper = "droid"
+repo_id = "cadene/droid_1.0.1"
+revision = "56b622ac23335c2bb5909e1e3c72416033c65acf"
+robot_id = "franka_panda_robotiq2f85"
+num_episodes = 10
+seed = 0
+license = "apache-2.0"   # as declared on the source dataset card

@@ -1,0 +1,10 @@
+# pipeline output and download cache (recreated by `robot-ingest ingest`)
+data/
+# environments and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.DS_Store
