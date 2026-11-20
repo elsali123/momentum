@@ -1,5 +1,6 @@
 """Episode viewer: a small JSON API over the catalog, plus static files (page, videos, thumbnails).
 
+It reads the live catalog (catalog.sqlite), so episodes appear while an ingest is still running.
 Videos are served by Starlette's StaticFiles, which answers HTTP range requests, so the browser
 can seek inside an MP4 without downloading all of it.
 """
@@ -13,8 +14,9 @@ import pyarrow.parquet as pq
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from robot_ingest.catalog import connect
+from robot_ingest.catalog import Catalog
 from robot_ingest.schema import column_matrix
+from robot_ingest.store import Store
 from robot_ingest.validate import BLACK_LUMA, ee_jumps
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -22,8 +24,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 LIST_SQL = """
 SELECT e.episode_id, e.customer_id, e.source_id, e.robot_id, r.arm_model, r.gripper_model,
        e.task, e.language_instruction, e.success, e.quality_rating, e.num_frames, e.fps,
-       e.duration_s, len(e.camera_ids) AS num_cameras, len(e.validation_warnings) AS num_warnings,
-       e.commercial_use_allowed,
+       e.duration_s, json_array_length(e.camera_ids) AS num_cameras,
+       json_array_length(e.validation_warnings) AS num_warnings, e.commercial_use_allowed,
        (SELECT c.thumbnail_path FROM cameras c WHERE c.episode_id = e.episode_id
         ORDER BY c.role = 'wrist', c.camera_id LIMIT 1) AS thumbnail_path   -- prefer a scene view
 FROM episodes e JOIN robots r USING (robot_id)
@@ -31,32 +33,28 @@ ORDER BY e.customer_id, e.source_id, e.source_episode_index
 """
 
 
-def _rows(relation) -> list[dict]:
-    columns = [d[0] for d in relation.description]
-    return [dict(zip(columns, row)) for row in relation.fetchall()]
-
-
 def create_app(store_root: str | Path) -> FastAPI:
-    root = Path(store_root).resolve()
-    if not (root / "episodes.parquet").exists():
-        raise SystemExit(f"no catalog in {root}: run `robot-ingest ingest` first")
-    con = connect(root)
+    store = Store(Path(store_root).resolve())
+    root = store.root
+    if not store.catalog_path.exists():
+        raise SystemExit(f"no catalog in {root}: run `robot-ingest ingest`, or `robot-ingest catalog` "
+                         "to build one from existing episode folders")
+    catalog = Catalog(store.catalog_path)
     app = FastAPI(title="Episode viewer")
 
     @app.get("/api/episodes")
     def list_episodes() -> list[dict]:
-        return _rows(con.cursor().execute(LIST_SQL))
+        return catalog.query(LIST_SQL)
 
     @app.get("/api/episodes/{episode_id}")
     def get_episode(episode_id: str) -> dict:
-        cur = con.cursor()
-        episodes = _rows(cur.execute(
+        episodes = catalog.query(
             "SELECT e.*, r.arm_model, r.gripper_model, r.joint_names FROM episodes e "
-            "JOIN robots r USING (robot_id) WHERE e.episode_id = ?", [episode_id]))
+            "JOIN robots r USING (robot_id) WHERE e.episode_id = ?", [episode_id])
         if not episodes:  # also guards the file path below against arbitrary input
             raise HTTPException(404, f"unknown episode {episode_id}")
-        cameras = _rows(cur.execute(
-            "SELECT * FROM cameras WHERE episode_id = ? ORDER BY role <> 'wrist', camera_id", [episode_id]))
+        cameras = catalog.query(
+            "SELECT * FROM cameras WHERE episode_id = ? ORDER BY role <> 'wrist', camera_id", [episode_id])
         for camera in cameras:
             camera["black"] = camera["mean_luma"] < BLACK_LUMA  # same threshold as the ingest warning
         return {"episode": episodes[0], "cameras": cameras, "series": _series(root / "episodes" / episode_id / "frames.parquet")}

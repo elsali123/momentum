@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     ingest.add_argument("--force", action="store_true", help="re-ingest episodes that are already up to date")
     ingest.add_argument("--cache-dir", default=DEFAULT_CACHE, help=f"Hugging Face download cache (default {DEFAULT_CACHE})")
 
-    sub.add_parser("catalog", help="rebuild episodes/cameras/robots tables from the episode bundles")
+    sub.add_parser("catalog", help="rebuild the catalog from the episode folders (recovery; ingest keeps it current)")
 
     query = sub.add_parser("query", help="run SQL against the store (views: episodes, cameras, robots, frames)")
     query.add_argument("sql")
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
-    for noisy in ("httpx", "httpcore", "huggingface_hub", "urllib3", "libav", "filelock"):
+    for noisy in ("httpx", "httpx2", "httpcore", "httpcore2", "huggingface_hub", "urllib3", "libav", "filelock"):
         logging.getLogger(noisy).setLevel(logging.WARNING)  # after imports: some libraries reset their level on import
 
     store = Store(args.store)

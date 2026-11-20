@@ -1,6 +1,6 @@
 [project]
 name = "robot-ingest"
-version = "0.1.0"
+version = "0.2.0"
 description = "Normalize and ingest customer robot-learning datasets (RH20T, DROID) into one canonical schema."
 readme = "README.md"
 requires-python = ">=3.11"

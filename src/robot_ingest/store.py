@@ -7,7 +7,8 @@
   episodes/<episode_id>/frames.parquet             silver: canonical frames
   episodes/<episode_id>/videos/<camera_id>.mp4     silver: canonical H.264 video
   episodes/<episode_id>/thumbs/<camera_id>.jpg
-  episodes.parquet, cameras.parquet, robots.parquet   catalog tables, rebuilt from the bundles
+  catalog.sqlite                                   catalog: updated as each episode is committed
+  episodes.parquet, cameras.parquet, robots.parquet   catalog snapshot for analytics, exported each run
   rejected/<episode_id>.json                       episodes that failed validation, with reasons
   reports/ingest_report.json                       outcome of the last run
 
@@ -35,6 +36,10 @@ class Store:
 
     def raw_episode_path(self, source_id: str, source_episode_index: int) -> Path:
         return self.root / "raw" / source_id / "episodes" / f"{source_episode_index:06d}.parquet"
+
+    @property
+    def catalog_path(self) -> Path:
+        return self.root / "catalog.sqlite"
 
     # silver
     def episode_dir(self, episode_id: str) -> Path:

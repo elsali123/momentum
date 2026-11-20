@@ -82,14 +82,18 @@ Every claim below was checked against the data, not taken from dataset cards.
                                                                                     ▼
              ┌──────────────────────────── per episode, in a thread pool ───────────────────────┐
              │ raw copy ─► validate_frames ─► frames.parquet ─► transcode each camera ─► commit  │
-             │              │ errors            (HTTP range reads → H.264, frame-exact)    atomic │
-             │              ▼                                                             rename │
-             │        rejected/<id>.json  (next candidate is tried instead)                      │
-             └───────────────────────────────────────────────────────────────────────────────────┘
-                                                                                    │
-                     build_catalog: episodes/cameras/robots.parquet  ◄──────────────┘
-                                         │
-                     DuckDB views (catalog.connect) ──► viewer API, training queries, `robot-ingest query`
+             │              │ errors            (HTTP range reads → H.264, frame-exact,    atomic │
+             │              ▼                    or reused when its inputs are unchanged)  rename │
+             │        rejected/<id>.json  (next candidate is tried instead)                  │    │
+             └───────────────────────────────────────────────────────────────────────────────│────┘
+                                                                                             ▼
+                     catalog.sqlite  ◄── one episode's rows, written right after its commit
+                       │        │
+                       │        └──► viewer API (live, during a run too)
+                       ▼
+                     end of run: Parquet snapshot (episodes/cameras/robots.parquet)
+                       │
+                     DuckDB views (catalog.connect) ──► training queries, `robot-ingest query`
 ```
 
 | Module | Responsibility |
@@ -104,7 +108,7 @@ Every claim below was checked against the data, not taken from dataset cards.
 | `validate.py` | Hard errors and warnings per episode |
 | `store.py` | On-disk layout, staging, atomic commit, quarantine |
 | `pipeline.py` | Orchestration: selection, parallelism, bundles, report |
-| `catalog.py` | Consolidated tables and DuckDB views |
+| `catalog.py` | The catalog (SQLite, updated per episode), its Parquet snapshot, DuckDB views |
 | `viewer/` | FastAPI API + one static HTML page |
 | `scripts/check_orientation.py` | Onboarding check of pose conventions against kinematics |
 
@@ -130,13 +134,13 @@ Each decision: **what** was decided, the **alternatives**, **why**, and the **co
 ### D2. Storage: Parquet + per-episode MP4 + DuckDB views, with the episode as the unit of work
 
 - **Decision.** Each episode is a self-contained bundle: `episode.json` (metadata and camera rows),
-  `frames.parquet`, one MP4 and one thumbnail per camera. A catalog step consolidates the bundles
-  into `episodes.parquet`, `cameras.parquet` and `robots.parquet`, and `catalog.connect()` exposes
-  them plus a `frames` view (glob over all episodes) through in-memory DuckDB.
-- **Alternatives.** Postgres for metadata (heavier to run for reviewers); one big frames table per
-  source (fewer files, but every re-ingest rewrites it); a persisted `.duckdb` file (DuckDB
-  resolves relative paths against the working directory, so a persisted catalog breaks when the
-  store moves).
+  `frames.parquet`, one MP4 and one thumbnail per camera. The episodes, cameras and robots tables
+  live in a catalog kept current per episode (D24) and exported each run as `episodes.parquet`,
+  `cameras.parquet` and `robots.parquet`; `catalog.connect()` exposes those plus a `frames` view
+  (glob over all episodes) through in-memory DuckDB.
+- **Alternatives.** One big frames table per source (fewer files, but every re-ingest rewrites
+  it); a persisted `.duckdb` file (DuckDB resolves relative paths against the working directory,
+  so a persisted catalog breaks when the store moves).
 - **Why.** Parquet is columnar, typed and readable by every training stack; one file per episode
   makes ingest idempotent and parallel (each worker writes only its own bundle) and makes deleting
   one customer's episode trivial. The bundles are the source of truth; the catalog is derived and
@@ -377,11 +381,13 @@ Each decision: **what** was decided, the **alternatives**, **why**, and the **co
 
 ### D21. Viewer
 
-- **Decision.** A FastAPI app (`robot-ingest serve`) with two JSON endpoints over the DuckDB
-  catalog, plus one static HTML page with no build step. Features: episode list with filters
-  (customer, robot, outcome, license, text), synchronized multi-camera playback with one scrubber,
-  frame stepping and speed control, EE/gripper/joint/force plots with a time cursor (click to
-  seek), validation warnings and provenance.
+- **Decision.** A FastAPI app (`robot-ingest serve`) with three JSON endpoints over the live
+  catalog (episode list, one episode, last run report), plus one static HTML page with no build
+  step. Features: episode list with filters (customer, robot, outcome, license, text),
+  synchronized multi-camera playback with one scrubber, frame stepping and speed control,
+  EE/gripper/joint/force plots with a time cursor (click to seek), arm jumps marked on the plots,
+  a tag on black camera streams, validation warnings and provenance, and a run report listing
+  every rejected or failed episode with its reasons.
 - **How sync works.** The first video is the clock; the others are re-seeked when they drift more
   than 1.5 frames. Seeks target the middle of a frame's display interval, `(i + 0.5) / fps`, so the
   shown frame is exactly frame *i*. Videos are served with HTTP range support, so seeking doesn't
@@ -397,7 +403,7 @@ Each decision: **what** was decided, the **alternatives**, **why**, and the **co
 - **scipy** for rotation conversions: rotation conventions are the classic source of silent bugs,
   so we use the reference implementation and test our conventions against explicit matrices.
 - **DuckDB** for SQL over Parquet without a server.
-- **pytest**: 39 tests, all offline. 20 unit tests cover rotation conventions, quaternion
+- **pytest**: 56 tests, all offline. 20 unit tests cover rotation conventions, quaternion
   continuity, gripper normalization, validation rules, deterministic selection, kinematics, and
   frame-exact video cutting on a synthetic video whose frames encode their own index.
   `tests/test_pipeline_failures.py` (15 tests) runs the real pipeline end to end on a tiny fake
@@ -406,6 +412,8 @@ Each decision: **what** was decided, the **alternatives**, **why**, and the **co
   leftovers from a killed run, re-runs, a new code version that now rejects a kept episode,
   the replacement loop, running out of candidates, and a catalog/schema mismatch.
   `tests/test_viewer.py` (4 tests) checks the viewer API on a store built the same way.
+  `tests/test_reprocessing.py` (8) covers incremental re-runs (D23) and `tests/test_catalog.py`
+  (9) the catalog's write order, crash repair and rebuild (D24).
 
 ### D23. Re-runs redo only the steps whose inputs changed
 
@@ -428,6 +436,29 @@ Each decision: **what** was decided, the **alternatives**, **why**, and the **co
   Keying the fingerprint on the source file's content hash instead of the revision would also
   survive unrelated upstream commits (a README edit bumps the revision today). On object storage,
   the hard link becomes a server-side copy.
+
+### D24. A catalog updated per episode, not rebuilt per run
+
+- **Decision.** The episodes, cameras and robots tables live in `catalog.sqlite`. The pipeline
+  writes an episode's rows in one transaction right after committing its bundle, and removes them
+  right before a rejected episode's files are deleted, so the catalog never lists files that
+  aren't there. Rows are checked against the schema before the bundle is committed, so a mapper
+  bug fails that episode rather than the catalog. The viewer reads the catalog directly (WAL mode:
+  readers and the writer don't block each other). At the end of a run the tables are exported to
+  Parquet for DuckDB and training. `robot-ingest catalog` rebuilds everything from the bundles.
+- **Alternatives.** Rebuilding the Parquet tables from every bundle at the end of each run (the
+  previous design: every run read every `episode.json` in the store, a million file reads, or
+  S3 requests, at DROID scale); Postgres (the production choice, but a server to run locally);
+  DuckDB as the database (one writer process locks out readers, so the viewer couldn't run during
+  an ingest).
+- **Why.** Run time now depends on the episodes a run touches, not on the size of the store, and
+  episodes appear in the viewer as they land. SQLite is the zero-setup equivalent of the
+  production Postgres catalog: same tables, same transactions.
+- **Cost.** If a run dies between committing a bundle and writing its rows, that episode is
+  missing from the catalog until the next run reaches it (it re-adds catalog rows for skipped
+  episodes) or a rebuild. The Parquet export still reads the whole catalog, but as one query
+  rather than one file per episode; at larger scale it becomes partitioned and incremental (an
+  Iceberg or Delta table).
 
 ---
 

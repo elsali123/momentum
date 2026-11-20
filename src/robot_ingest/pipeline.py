@@ -29,7 +29,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 from robot_ingest import __version__
-from robot_ingest.catalog import build_catalog
+from robot_ingest.catalog import Catalog, check_bundle
 from robot_ingest.config import Config, PipelineSettings, SourceSpec
 from robot_ingest.schema import SCHEMA_VERSION
 from robot_ingest.sources import MAPPERS
@@ -78,15 +78,17 @@ def run_ingest(
     force: bool = False,
 ) -> list[EpisodeOutcome]:
     sources = [config.source(s) for s in source_ids] if source_ids else list(config.sources)
+    catalog = Catalog(store.catalog_path)
+    catalog.put_robots(config.robots.values())
     outcomes: list[EpisodeOutcome] = []
     for spec in sources:
-        outcomes += ingest_source(spec, config, store, cache_dir, num_episodes, workers, force)
-    build_catalog(store, config)
+        outcomes += ingest_source(spec, config, store, catalog, cache_dir, num_episodes, workers, force)
+    catalog.export_parquet(store.root)  # analytics snapshot; the catalog itself is already current
     write_report(store, outcomes)
     return outcomes
 
 
-def ingest_source(spec: SourceSpec, config: Config, store: Store, cache_dir: Path,
+def ingest_source(spec: SourceSpec, config: Config, store: Store, catalog: Catalog, cache_dir: Path,
                   num_episodes: int | None, workers: int, force: bool) -> list[EpisodeOutcome]:
     log.info("source %s: %s @ %s", spec.source_id, spec.repo_id, spec.revision[:10])
     repo = LeRobotRepo(spec.repo_id, spec.revision, cache_dir)
@@ -101,7 +103,7 @@ def ingest_source(spec: SourceSpec, config: Config, store: Store, cache_dir: Pat
         while accepted < target and next_candidate < len(candidates):
             batch = candidates[next_candidate:next_candidate + target - accepted]
             next_candidate += len(batch)
-            for outcome in pool.map(lambda i: ingest_episode(mapper, i, config, store, force), batch):
+            for outcome in pool.map(lambda i: ingest_episode(mapper, i, config, store, catalog, force), batch):
                 reused = f"{outcome.videos_reused} videos reused; " if outcome.videos_reused else ""
                 log.info("  %-22s %-9s %4.1fs %s", outcome.episode_id, outcome.status, outcome.seconds,
                          (reused + "; ".join(outcome.messages))[:160])
@@ -112,7 +114,8 @@ def ingest_source(spec: SourceSpec, config: Config, store: Store, cache_dir: Pat
     return outcomes
 
 
-def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, force: bool) -> EpisodeOutcome:
+def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, catalog: Catalog,
+                   force: bool) -> EpisodeOutcome:
     spec, settings = mapper.spec, config.pipeline
     episode_id = make_episode_id(spec.source_id, index)
     started = time.monotonic()
@@ -121,12 +124,14 @@ def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, for
     def outcome(status: str, messages: list[str], videos_reused: int = 0) -> EpisodeOutcome:
         return EpisodeOutcome(episode_id, spec.source_id, status, messages, time.monotonic() - started, videos_reused)
 
-    previous = None if force else store.load_bundle(episode_id)  # --force rebuilds everything, videos included
-    if is_up_to_date(previous, build):
-        return outcome("skipped", [])
-
     staging = None
     try:
+        previous = None if force else store.load_bundle(episode_id)  # --force rebuilds everything, videos included
+        if is_up_to_date(previous, build):
+            if not catalog.has(previous["episode"]):  # committed, but the run stopped before the catalog write
+                catalog.put_episode(previous)
+            return outcome("skipped", [])
+
         episode = mapper.normalize(index)
         # Bronze copy first, so a rejected episode can still be inspected.
         raw_path = store.raw_episode_path(spec.source_id, index)
@@ -137,7 +142,7 @@ def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, for
         validation = validate_frames(episode.frames, mapper.robot, fps, settings.min_episode_frames)
         validation.warnings[:0] = episode.warnings
         if validation.errors:
-            return reject(store, episode_id, spec, validation.errors)
+            return reject(store, catalog, episode_id, spec, validation.errors)
 
         staging = store.new_staging_dir(episode_id)
         pq.write_table(episode.frames, staging / "frames.parquet", compression="zstd")
@@ -179,11 +184,13 @@ def ingest_episode(mapper: Mapper, index: int, config: Config, store: Store, for
 
         bundle = {"episode": episode_row(episode, mapper, validation.warnings), "cameras": camera_rows,
                   "build": {**build, "videos": fingerprints}}
+        check_bundle(bundle)  # a schema mismatch fails this episode here, before anything is committed
         (staging / "episode.json").write_text(json.dumps(bundle, indent=2))
         store.commit(episode_id, staging)
+        catalog.put_episode(bundle)  # after the commit, so the catalog never lists files that aren't there yet
         return outcome("ingested", validation.warnings, reused)
     except (SourceDataError, VideoError) as exc:
-        return reject(store, episode_id, spec, [str(exc)])
+        return reject(store, catalog, episode_id, spec, [str(exc)])
     except Exception as exc:  # noqa: BLE001 - one bad episode must not stop the run; it is reported
         log.exception("episode %s failed", episode_id)
         return outcome("failed", [f"{type(exc).__name__}: {exc}"])
@@ -255,7 +262,8 @@ def reusable_video(previous: dict | None, camera_id: str, fingerprint: str, stor
     return row
 
 
-def reject(store: Store, episode_id: str, spec: SourceSpec, reasons: list[str]) -> EpisodeOutcome:
+def reject(store: Store, catalog: Catalog, episode_id: str, spec: SourceSpec, reasons: list[str]) -> EpisodeOutcome:
+    catalog.remove_episode(episode_id)  # before the files go, so the catalog never lists a deleted episode
     store.reject(episode_id, {
         "episode_id": episode_id,
         "source_id": spec.source_id,

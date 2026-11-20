@@ -29,7 +29,7 @@ Customer ──upload──► Raw bucket (per customer, versioned, never modifi
 | Storage | `data/store` on a laptop | Object storage (S3 or GCS) with the same layout; file access through fsspec (`s3://…`) | One layout everywhere. Paths inside the tables are already relative to the store root. |
 | Raw data | A pinned Hugging Face revision | Customer uploads land in our own versioned raw bucket first; Hugging Face becomes one import path | We own the untouched copy, so reprocessing never depends on someone else's repo. |
 | Committing a recording | Build in a staging folder, then rename | Write every file, then `episode.json` last as the "done" marker; readers ignore folders without it | Object storage has no atomic folder rename. |
-| Catalog | Parquet tables + in-memory DuckDB | Postgres for the app; Parquet + DuckDB (reading object storage directly) for analysis and training | The app needs fast filtered lookups and per-customer access control. |
+| Catalog | SQLite, updated per episode; a Parquet snapshot each run for DuckDB | Postgres for the app (same tables and write order); Parquet + DuckDB (reading object storage directly) for analysis and training | The app needs fast filtered lookups, concurrent writers and per-customer access control. |
 | Execution | One machine, a thread pool | An orchestrator (e.g. Dagster) runs `ingest_episode` as one job per recording on autoscaled container workers, using cheap spot capacity | Jobs are already idempotent, so retries and interrupted machines are safe. |
 | Viewer | Local FastAPI serving files from disk | Hosted FastAPI behind single sign-on; videos through a CDN with expiring links (seeking works the same way) | Scale and access control. |
 | Monitoring | Log lines + `reports/ingest_report.json` | Metrics, dashboards and alerts: failures, warning rate per customer, queue backlog, cost | A customer changing their format shows up as a warning spike, not a silent bug. |
@@ -38,7 +38,7 @@ Customer ──upload──► Raw bucket (per customer, versioned, never modifi
 
 ### Phase 1: cloud-ready (1–2 weeks)
 - Storage abstraction (fsspec), a container image built from `uv.lock`, settings and secrets from the environment.
-- "Done"-marker commits; a Postgres catalog writer next to the Parquet tables.
+- "Done"-marker commits; the catalog moves from SQLite to Postgres.
 - CI running the test suite plus a small end-to-end ingest.
 
 ### Phase 2: production MVP (3–4 weeks)

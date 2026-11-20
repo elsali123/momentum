@@ -58,8 +58,9 @@ video; downloads are ~170 MB of Parquet and metadata plus ~1.5 GB of video byte 
 
 ## Querying the store
 
-The catalog is plain Parquet; `robot-ingest query` runs SQL over it with DuckDB
-(views: `episodes`, `cameras`, `robots`, `frames`):
+The catalog (`catalog.sqlite`) is updated as each episode is committed, and the viewer reads it
+directly. At the end of every run it is also exported as plain Parquet, which `robot-ingest query`
+runs SQL over with DuckDB (views: `episodes`, `cameras`, `robots`, `frames`):
 
 ```bash
 uv run robot-ingest query "SELECT robot_id, count(*) AS episodes, round(sum(duration_s)/60, 1) AS minutes,
@@ -94,9 +95,10 @@ assert len(images) == frames.num_rows                                    # video
 data/
   hf_cache/                                  Hugging Face download cache (Parquet + metadata only)
   store/
-    episodes.parquet  cameras.parquet  robots.parquet     catalog tables (rebuilt from the bundles)
+    catalog.sqlite                           catalog: episodes, cameras, robots (updated per episode)
+    episodes.parquet  cameras.parquet  robots.parquet     the same tables as Parquet, exported each run
     episodes/<episode_id>/
-      episode.json                           episode + camera metadata, validation warnings
+      episode.json                           episode + camera metadata, validation warnings, build info
       frames.parquet                         canonical state/action timeseries
       videos/<camera_id>.mp4                 H.264, frame-exact with frames.parquet
       thumbs/<camera_id>.jpg
@@ -117,7 +119,7 @@ Sources, their pinned Hub revisions, sample sizes, seeds and robot specs are in
 uv run robot-ingest ingest --source droid           # one source (repeatable)
 uv run robot-ingest ingest --num-episodes 3         # override the sample size
 uv run robot-ingest ingest --workers 8 --force      # more parallelism, rebuild everything
-uv run robot-ingest catalog                         # rebuild the catalog tables only
+uv run robot-ingest catalog                         # rebuild the catalog from the episode folders
 uv run robot-ingest --store /path/to/store serve --port 8080
 ```
 
